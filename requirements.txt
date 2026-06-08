@@ -1,3 +1,4 @@
 aiogram==3.7.0
 aiosqlite
 SpeechRecognition
+setuptools
