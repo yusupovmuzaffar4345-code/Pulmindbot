@@ -1,0 +1,4 @@
+aiogram==3.7.0
+aiosqlite
+pydub
+SpeechRecognition
