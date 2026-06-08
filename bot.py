@@ -13,7 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
 
 # === SOZLAMALAR ===
-TOKEN = os.getenv("8712095885:AAG0-JyZ8IKsrRUOdn3UkVEENpL-F5ger2A")
+TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
