@@ -23,6 +23,11 @@ dp = Dispatcher(storage=storage)
 class TolovHolat(StatesGroup):
     tolov_turi = State()
 
+class ChekHolat(StatesGroup):
+    amount = State()
+    category = State()
+    tolov_turi = State()
+
 # === DATABASE ===
 async def init_db():
     async with aiosqlite.connect("data.db") as db:
@@ -57,15 +62,12 @@ def get_category(text):
 def get_amount(text):
     text = text.lower()
     text = text.replace(",", "").replace(" ", " ")
-
     ming_match = re.search(r"(\d+(?:\.\d+)?)\s*ming", text)
     if ming_match:
         return int(float(ming_match.group(1)) * 1000)
-
     mln_match = re.search(r"(\d+(?:\.\d+)?)\s*m(?:ln|ilion)?", text)
     if mln_match:
         return int(float(mln_match.group(1)) * 1_000_000)
-
     match = re.search(r"\d+", text)
     return int(match.group()) if match else None
 
@@ -83,11 +85,31 @@ def tolov_menu(prefix="t"):
     import time
     uid = str(int(time.time()))[-4:]
     return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="💵 Naqd", callback_data=f"tolov_naqd_{uid}_{prefix}"),
+            InlineKeyboardButton(text="💳 Karta", callback_data=f"tolov_karta_{uid}_{prefix}"),
+        ]]
+    )
+
+def chek_tolov_menu():
+    import time
+    uid = str(int(time.time()))[-4:]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="💵 Naqd", callback_data=f"chek_naqd_{uid}"),
+            InlineKeyboardButton(text="💳 Karta", callback_data=f"chek_karta_{uid}"),
+        ]]
+    )
+
+def kategoriya_menu():
+    return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="💵 Naqd", callback_data=f"tolov_naqd_{uid}_{prefix}"),
-                InlineKeyboardButton(text="💳 Karta", callback_data=f"tolov_karta_{uid}_{prefix}"),
-            ]
+            [InlineKeyboardButton(text="🚖 Transport", callback_data="chekcat_transport"),
+             InlineKeyboardButton(text="🍽 Ovqat", callback_data="chekcat_ovqat")],
+            [InlineKeyboardButton(text="🚌 Jamoat", callback_data="chekcat_jamoat"),
+             InlineKeyboardButton(text="🎬 Ko'ngil", callback_data="chekcat_kongil")],
+            [InlineKeyboardButton(text="💊 Sog'liq", callback_data="chekcat_soglik"),
+             InlineKeyboardButton(text="📦 Boshqa", callback_data="chekcat_boshqa")],
         ]
     )
 
@@ -95,17 +117,41 @@ def tolov_menu(prefix="t"):
 @dp.message(Command("start"))
 async def start(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer(
-        f"👋 Salom, {msg.from_user.first_name}!\n\n"
-        "💸 <b>PulMind</b> — xarajat hisoblovchi bot\n\n"
-        "📝 <b>Misol:</b>\n"
-        "• <code>20000 taksi</code>\n"
-        "• <code>20 ming tushlik</code>\n"
-        "• Ovozli xabar ham yuborishingiz mumkin\n\n"
-        "👇 Pastdagi tugmalardan foydalaning:",
-        parse_mode="HTML",
-        reply_markup=main_menu()
+
+    photo_url = "https://i.imgur.com/4QpKnKS.png"
+
+    uz_text = (
+        f"👋 Salom, <b>{msg.from_user.first_name}</b>!\n\n"
+        "💰 <b>PulMind</b> — aqlli xarajat hisoblovchi!\n\n"
+        "📌 <b>Nima qila oladi:</b>\n"
+        "• Xarajatlarni kategoriyaga ajratadi\n"
+        "• Naqd va karta bo'yicha hisoblab beradi\n"
+        "• Chek rasmini qabul qilib saqlaydi\n\n"
+        "✏️ <b>Misol:</b> <code>20 ming tushlik</code>"
     )
+
+    ru_text = (
+        "🇷🇺 <b>PulMind</b> — умный трекер расходов!\n\n"
+        "📌 <b>Возможности:</b>\n"
+        "• Категоризация расходов\n"
+        "• Учёт наличных и карты\n"
+        "• Принимает фото чеков\n\n"
+        "✏️ <b>Пример:</b> <code>20000 такси</code>"
+    )
+
+    try:
+        await msg.answer_photo(
+            photo=photo_url,
+            caption=f"{uz_text}\n\n{'—'*20}\n\n{ru_text}",
+            parse_mode="HTML",
+            reply_markup=main_menu()
+        )
+    except:
+        await msg.answer(
+            f"{uz_text}\n\n{'—'*20}\n\n{ru_text}",
+            parse_mode="HTML",
+            reply_markup=main_menu()
+        )
 
 # === YORDAM ===
 @dp.message(Command("help"))
@@ -117,7 +163,7 @@ async def yordam(msg: types.Message):
         "<code>20000 taksi</code>\n"
         "<code>20 ming tushlik</code>\n"
         "<code>5000 metro</code>\n\n"
-        "🎤 <b>Ovozli xabar</b> ham qabul qilinadi\n\n"
+        "📸 <b>Chek rasmi</b> yuborish ham mumkin\n\n"
         "📋 <b>Buyruqlar:</b>\n"
         "/hisob — Jami xarajatlar\n"
         "/tozala — Ma'lumotlarni o'chirish\n"
@@ -217,66 +263,80 @@ async def tozala_yoq(call: types.CallbackQuery):
     await call.message.edit_text("❌ Bekor qilindi.")
     await call.answer()
 
-# === OVOZLI XABAR ===
-@dp.message(F.voice)
-async def ovozli_xabar(msg: types.Message, state: FSMContext):
+# === CHEK RASMI ===
+@dp.message(F.photo)
+async def chek_rasmi(msg: types.Message, state: FSMContext):
     await state.clear()
-    wait_msg = await msg.answer("🎤 Ovoz qabul qilindi, tanilmoqda...")
-
-    file = await bot.get_file(msg.voice.file_id)
-    ogg_path = f"voice_{msg.from_user.id}.ogg"
-    wav_path = f"voice_{msg.from_user.id}.wav"
-
-    await bot.download_file(file.file_path, ogg_path)
-
-    text = None
-    try:
-        from pydub import AudioSegment
-        import speech_recognition as sr
-
-        AudioSegment.from_ogg(ogg_path).export(wav_path, format="wav")
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_path) as source:
-            audio_data = recognizer.record(source)
-            for lang in ["uz-UZ", "ru-RU"]:
-                try:
-                    text = recognizer.recognize_google(audio_data, language=lang)
-                    break
-                except:
-                    continue
-    except Exception as e:
-        pass
-    finally:
-        for f in [ogg_path, wav_path]:
-            if os.path.exists(f):
-                os.remove(f)
-
-    await wait_msg.delete()
-
-    if not text:
-        await msg.answer(
-            "⚠️ Ovozni tanib bo'lmadi.\n"
-            "Matn ko'rinishida yozing: <code>20000 taksi</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    await msg.answer(f"📝 Tanildi: <b>{text}</b>", parse_mode="HTML")
-
-    amount = get_amount(text)
-    if not amount:
-        await msg.answer("❌ Summani topa olmadim. Masalan: <code>20000 taksi</code>", parse_mode="HTML")
-        return
-
-    category = get_category(text)
-    await state.update_data(amount=amount, category=category)
-    await state.set_state(TolovHolat.tolov_turi)
-
+    await state.update_data(photo_id=msg.photo[-1].file_id)
     await msg.answer(
-        f"💰 <b>{amount:,} so'm</b> — {category}\n\nTo'lov turini tanlang:",
-        parse_mode="HTML",
-        reply_markup=tolov_menu("v")
+        "📸 <b>Chek qabul qilindi!</b>\n\n"
+        "💰 Summani yozing (masalan: <code>25000</code> yoki <code>25 ming</code>):",
+        parse_mode="HTML"
     )
+    await state.set_state(ChekHolat.amount)
+
+@dp.message(ChekHolat.amount)
+async def chek_amount(msg: types.Message, state: FSMContext):
+    amount = get_amount(msg.text)
+    if not amount:
+        await msg.answer("❌ Summani topa olmadim. Masalan: <code>25000</code>", parse_mode="HTML")
+        return
+    await state.update_data(amount=amount)
+    await msg.answer(
+        f"💰 Summa: <b>{amount:,} so'm</b>\n\n📂 Kategoriyani tanlang:",
+        parse_mode="HTML",
+        reply_markup=kategoriya_menu()
+    )
+    await state.set_state(ChekHolat.category)
+
+@dp.callback_query(ChekHolat.category, F.data.startswith("chekcat_"))
+async def chek_category(call: types.CallbackQuery, state: FSMContext):
+    cat_map = {
+        "chekcat_transport": "🚖 Transport",
+        "chekcat_ovqat": "🍽 Ovqat",
+        "chekcat_jamoat": "🚌 Jamoat transport",
+        "chekcat_kongil": "🎬 Ko'ngil ochar",
+        "chekcat_soglik": "💊 Sog'liq",
+        "chekcat_boshqa": "📦 Boshqa",
+    }
+    category = cat_map.get(call.data, "📦 Boshqa")
+    await state.update_data(category=category)
+    await call.message.edit_text(
+        f"📂 Kategoriya: <b>{category}</b>\n\n💳 To'lov turini tanlang:",
+        parse_mode="HTML",
+        reply_markup=chek_tolov_menu()
+    )
+    await state.set_state(ChekHolat.tolov_turi)
+    await call.answer()
+
+@dp.callback_query(ChekHolat.tolov_turi, F.data.startswith("chek_"))
+async def chek_tolov(call: types.CallbackQuery, state: FSMContext):
+    tolov_turi = "naqd" if "naqd" in call.data else "karta"
+    data = await state.get_data()
+    amount = data.get("amount")
+    category = data.get("category")
+
+    async with aiosqlite.connect("data.db") as db:
+        await db.execute(
+            "INSERT INTO transactions (user_id, amount, category, tolov_turi) VALUES (?, ?, ?, ?)",
+            (call.from_user.id, amount, category, tolov_turi)
+        )
+        await db.commit()
+
+    await state.clear()
+
+    icon = "💵" if tolov_turi == "naqd" else "💳"
+    tolov_nomi = "Naqd" if tolov_turi == "naqd" else "Karta"
+
+    await call.message.edit_text(
+        f"✅ <b>Chek saqlandi!</b>\n\n"
+        f"📸 Chek asosida:\n"
+        f"{icon} <b>{amount:,} so'm</b>\n"
+        f"📂 {category}\n"
+        f"💳 To'lov: {tolov_nomi}",
+        parse_mode="HTML"
+    )
+    await call.answer("✅ Saqlandi!")
 
 # === MATN XARAJAT ===
 MENU_BUTTONS = ["💰 Hisob", "📊 Kategoriyalar", "🗑 Tozalash", "ℹ️ Yordam"]
@@ -285,10 +345,8 @@ MENU_BUTTONS = ["💰 Hisob", "📊 Kategoriyalar", "🗑 Tozalash", "ℹ️ Yor
 async def save(msg: types.Message, state: FSMContext):
     if msg.text in MENU_BUTTONS:
         return
-
     await state.clear()
     text = msg.text
-
     amount = get_amount(text)
     if not amount:
         await msg.answer(
@@ -297,11 +355,9 @@ async def save(msg: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         return
-
     category = get_category(text)
     await state.update_data(amount=amount, category=category)
     await state.set_state(TolovHolat.tolov_turi)
-
     await msg.answer(
         f"💰 <b>{amount:,} so'm</b> — {category}\n\nTo'lov turini tanlang:",
         parse_mode="HTML",
@@ -313,7 +369,6 @@ async def save(msg: types.Message, state: FSMContext):
 async def tolov_tanlandi(call: types.CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
     tolov_turi = parts[1]
-
     data = await state.get_data()
     amount = data.get("amount")
     category = data.get("category")
@@ -331,7 +386,6 @@ async def tolov_tanlandi(call: types.CallbackQuery, state: FSMContext):
         await db.commit()
 
     await state.clear()
-
     icon = "💵" if tolov_turi == "naqd" else "💳"
     tolov_nomi = "Naqd" if tolov_turi == "naqd" else "Karta"
 
