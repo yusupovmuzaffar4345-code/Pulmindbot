@@ -1,11 +1,15 @@
-import asyncio
+[24.06.2026 12:14] Komiloff__: import asyncio
 import re
 import os
+import csv
+import io
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    BufferedInputFile
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,6 +19,7 @@ import aiosqlite
 # === SOZLAMALAR ===
 TOKEN = os.getenv("BOT_TOKEN")
 
+
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -23,10 +28,15 @@ dp = Dispatcher(storage=storage)
 class TolovHolat(StatesGroup):
     tolov_turi = State()
 
-class ChekHolat(StatesGroup):
-    amount = State()
-    category = State()
+class KirimHolat(StatesGroup):
     tolov_turi = State()
+
+class ByudjetHolat(StatesGroup):
+    miqdor = State()
+
+class EslatmaHolat(StatesGroup):
+    vaqt = State()
+    xabar = State()
 
 # === DATABASE ===
 async def init_db():
@@ -38,45 +48,102 @@ async def init_db():
             amount INTEGER,
             category TEXT,
             tolov_turi TEXT,
+            tur TEXT DEFAULT 'chiqim',
+            izoh TEXT,
             sana DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS byudjet (
+            user_id INTEGER PRIMARY KEY,
+            miqdor INTEGER,
+            oy TEXT
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS eslatmalar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            vaqt TEXT,
+            xabar TEXT,
+            sent INTEGER DEFAULT 0
+        )
+        """)
+        # Migrate: izoh ustunini qo'shish (agar yo'q bo'lsa)
+        try:
+            await db.execute("ALTER TABLE transactions ADD COLUMN izoh TEXT")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE transactions ADD COLUMN tur TEXT DEFAULT 'chiqim'")
+        except:
+            pass
         await db.commit()
 
 # === YORDAMCHI FUNKSIYALAR ===
 def get_category(text):
     text = text.lower()
-    if any(w in text for w in ["taksi", "yandex", "uber"]):
-        return "🚖 Transport"
-    elif any(w in text for w in ["ovqat", "tushlik", "nonushta", "kechki", "restoran", "cafe", "kafe"]):
-        return "🍽 Ovqat"
+    if any(w in text for w in ["taksi", "yandex", "uber", "transport"]):
+        return "ð Transport"
+    elif any(w in text for w in ["ovqat", "tushlik", "nonushta", "kechki", "restoran", "cafe", "kafe", "doner", "pizza", "burger"]):
+        return "ð½ Ovqat"
     elif any(w in text for w in ["metro", "avtobus", "aftobus", "marshrutka"]):
-        return "🚌 Jamoat transport"
-    elif any(w in text for w in ["kino", "o'yin", "oyun", "kontsert"]):
-        return "🎬 Ko'ngil ochar"
-    elif any(w in text for w in ["dori", "apteka", "shifokor"]):
-        return "💊 Sog'liq"
+        return "ð Jamoat transport"
+    elif any(w in text for w in ["kino", "o'yin", "oyun", "kontsert", "o'yin"]):
+        return "ð¬ Ko'ngil ochar"
+    elif any(w in text for w in ["dori", "apteka", "shifokor", "klinika"]):
+        return "ð Sog'liq"
+    elif any(w in text for w in ["kiyim", "oyoq kiyim", "ko'ylak", "shim", "bozor"]):
+        return "ð Kiyim"
+    elif any(w in text for w in ["kommunal", "gaz", "suv", "elektr", "internet", "telefon"]):
+        return "ð  Kommunal"
+    elif any(w in text for w in ["o'quv", "kitob", "kurs", "ta'lim", "maktab", "universitet"]):
+        return "ð Ta'lim"
     else:
-        return "📦 Boshqa"
+        return "ð¦ Boshqa"
 
 def get_amount(text):
-    text = text.lower()
-    text = text.replace(",", "").replace(" ", " ")
-    ming_match = re.search(r"(\d+(?:\.\d+)?)\s*ming", text)
+    """
+    Raqamni to'g'ri parse qilish.
+    '17 ming' â 17000
+    '1.5 mln' â 1500000
+    '20000' â 20000
+    """
+    text = text.lower().strip()
+    text = text.replace(",", ".")
+
+    # MING: "17 ming", "17ming", "17k"
+    ming_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:ming|k\b)", text)
     if ming_match:
         return int(float(ming_match.group(1)) * 1000)
-    mln_match = re.search(r"(\d+(?:\.\d+)?)\s*m(?:ln|ilion)?", text)
+
+    # MILLION: "1.5 mln", "2 million", "3 mlrd" â lekin "ming" so'zini ushlaMASLIK uchun
+    # regex: "mln" yoki "million" yoki "mlrd" â "m" yolg'iz emas
+    mln_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:mln|million|mlrd|milliard)", text)
     if mln_match:
-        return int(float(mln_match.group(1)) * 1_000_000)
-    match = re.search(r"\d+", text)
+        val = float(mln_match.group(1))
+        if "mlrd" in text or "milliard" in text:
+            return int(val * 1_000_000_000)
+        return int(val * 1_000_000)
+
+    # Oddiy raqam: "20000"
+[24.06.2026 12:14] Komiloff__: match = re.search(r"\d+", text)
     return int(match.group()) if match else None
+
+def format_sum(amount):
+    return f"{amount:,}".replace(",", " ")
+
+def get_oy():
+    return datetime.now().strftime("%Y-%m")
 
 # === MENU TUGMALARI ===
 def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="💰 Hisob"), KeyboardButton(text="📊 Kategoriyalar")],
-            [KeyboardButton(text="🗑 Tozalash"), KeyboardButton(text="ℹ️ Yordam")],
+            [KeyboardButton(text="ð° Hisob"), KeyboardButton(text="ð Statistika")],
+            [KeyboardButton(text="ð¥ Kirim"), KeyboardButton(text="ð¤ Chiqim")],
+            [KeyboardButton(text="ð¯ Byudjet"), KeyboardButton(text="ð Eksport")],
+            [KeyboardButton(text="ð Eslatma"), KeyboardButton(text="â¹ï¸ Yordam")],
         ],
         resize_keyboard=True
     )
@@ -86,30 +153,32 @@ def tolov_menu(prefix="t"):
     uid = str(int(time.time()))[-4:]
     return InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text="💵 Naqd", callback_data=f"tolov_naqd_{uid}_{prefix}"),
-            InlineKeyboardButton(text="💳 Karta", callback_data=f"tolov_karta_{uid}_{prefix}"),
+            InlineKeyboardButton(text="ðµ Naqd", callback_data=f"tolov_naqd_{uid}_{prefix}"),
+            InlineKeyboardButton(text="ð³ Karta", callback_data=f"tolov_karta_{uid}_{prefix}"),
         ]]
     )
 
-def chek_tolov_menu():
+def kirim_tolov_menu(prefix="k"):
     import time
     uid = str(int(time.time()))[-4:]
     return InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text="💵 Naqd", callback_data=f"chek_naqd_{uid}"),
-            InlineKeyboardButton(text="💳 Karta", callback_data=f"chek_karta_{uid}"),
+            InlineKeyboardButton(text="ðµ Naqd", callback_data=f"kirim_naqd_{uid}_{prefix}"),
+            InlineKeyboardButton(text="ð³ Karta", callback_data=f"kirim_karta_{uid}_{prefix}"),
         ]]
     )
 
-def kategoriya_menu():
+def hisobot_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚖 Transport", callback_data="chekcat_transport"),
-             InlineKeyboardButton(text="🍽 Ovqat", callback_data="chekcat_ovqat")],
-            [InlineKeyboardButton(text="🚌 Jamoat", callback_data="chekcat_jamoat"),
-             InlineKeyboardButton(text="🎬 Ko'ngil", callback_data="chekcat_kongil")],
-            [InlineKeyboardButton(text="💊 Sog'liq", callback_data="chekcat_soglik"),
-             InlineKeyboardButton(text="📦 Boshqa", callback_data="chekcat_boshqa")],
+            [
+                InlineKeyboardButton(text="ð Bugun", callback_data="stat_bugun"),
+                InlineKeyboardButton(text="ð Bu hafta", callback_data="stat_hafta"),
+            ],
+            [
+                InlineKeyboardButton(text="ð Bu oy", callback_data="stat_oy"),
+                InlineKeyboardButton(text="ð Jami", callback_data="stat_jami"),
+            ],
         ]
     )
 
@@ -117,249 +186,598 @@ def kategoriya_menu():
 @dp.message(Command("start"))
 async def start(msg: types.Message, state: FSMContext):
     await state.clear()
-
-    photo_url = "https://i.imgur.com/4QpKnKS.png"
-
-    uz_text = (
-        f"👋 Salom, <b>{msg.from_user.first_name}</b>!\n\n"
-        "💰 <b>PulMind</b> — aqlli xarajat hisoblovchi!\n\n"
-        "📌 <b>Nima qila oladi:</b>\n"
-        "• Xarajatlarni kategoriyaga ajratadi\n"
-        "• Naqd va karta bo'yicha hisoblab beradi\n"
-        "• Chek rasmini qabul qilib saqlaydi\n\n"
-        "✏️ <b>Misol:</b> <code>20 ming tushlik</code>"
+    await msg.answer(
+        f"ð Salom, {msg.from_user.first_name}!\n\n"
+        "ð¸ <b>PulMind</b> â aqlli xarajat hisoblovchi\n\n"
+        "ð <b>Misol:</b>\n"
+        "â¢ <code>20000 taksi</code>\n"
+        "â¢ <code>20 ming tushlik</code>\n"
+        "â¢ <code>1.5 mln maosh</code> (kirim)\n"
+        "â¢ Ovozli xabar ham yuborishingiz mumkin\n\n"
+        "ð Pastdagi tugmalardan foydalaning:",
+        parse_mode="HTML",
+        reply_markup=main_menu()
     )
-
-    ru_text = (
-        "🇷🇺 <b>PulMind</b> — умный трекер расходов!\n\n"
-        "📌 <b>Возможности:</b>\n"
-        "• Категоризация расходов\n"
-        "• Учёт наличных и карты\n"
-        "• Принимает фото чеков\n\n"
-        "✏️ <b>Пример:</b> <code>20000 такси</code>"
-    )
-
-    try:
-        await msg.answer_photo(
-            photo=photo_url,
-            caption=f"{uz_text}\n\n{'—'*20}\n\n{ru_text}",
-            parse_mode="HTML",
-            reply_markup=main_menu()
-        )
-    except:
-        await msg.answer(
-            f"{uz_text}\n\n{'—'*20}\n\n{ru_text}",
-            parse_mode="HTML",
-            reply_markup=main_menu()
-        )
 
 # === YORDAM ===
 @dp.message(Command("help"))
-@dp.message(F.text == "ℹ️ Yordam")
+@dp.message(F.text == "â¹ï¸ Yordam")
 async def yordam(msg: types.Message):
     await msg.answer(
-        "📖 <b>Qo'llanma:</b>\n\n"
-        "✏️ <b>Xarajat yozish:</b>\n"
+        "ð <b>Qo'llanma:</b>\n\n"
+        "âï¸ <b>Chiqim yozish:</b>\n"
         "<code>20000 taksi</code>\n"
         "<code>20 ming tushlik</code>\n"
-        "<code>5000 metro</code>\n\n"
-        "📸 <b>Chek rasmi</b> yuborish ham mumkin\n\n"
-        "📋 <b>Buyruqlar:</b>\n"
-        "/hisob — Jami xarajatlar\n"
-        "/tozala — Ma'lumotlarni o'chirish\n"
-        "/start — Qayta boshlash",
+        "<code>5 ming metro</code>\n\n"
+        "ð¥ <b>Kirim yozish:</b>\n"
+        "<code>ð¥ Kirim</code> tugmasini bosing\n"
+        "yoki: <code>2 mln maosh</code>\n\n"
+        "ð¤ <b>Ovozli xabar</b> ham qabul qilinadi\n\n"
+        "ð <b>Raqam yozish usullari:</b>\n"
+        "<code>17 ming</code> â 17,000 so'm\n"
+        "<code>1.5 mln</code> â 1,500,000 so'm\n"
+        "<code>50000</code> â 50,000 so'm\n\n"
+        "ð <b>Buyruqlar:</b>\n"
+        "/hisob â Balans\n"
+        "/statistika â Hisobotlar\n"
+        "/byudjet â Byudjet belgilash\n"
+        "/eksport â CSV yuklash\n"
+        "/tozala â Ma'lumotlarni o'chirish\n"
+        "/start â Qayta boshlash",
         parse_mode="HTML",
         reply_markup=main_menu()
     )
 
-# === HISOB ===
+# === HISOB (BALANS) ===
 @dp.message(Command("hisob"))
-@dp.message(F.text == "💰 Hisob")
+@dp.message(F.text == "ð° Hisob")
 async def hisob(msg: types.Message, state: FSMContext):
     await state.clear()
+    uid = msg.from_user.id
     async with aiosqlite.connect("data.db") as db:
-        cursor = await db.execute(
-            "SELECT SUM(amount) FROM transactions WHERE user_id=?", (msg.from_user.id,))
-        total = (await cursor.fetchone())[0] or 0
+        # Jami chiqim
+        cur = await db.execute(
+            "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='chiqim'", (uid,))
+        jami_chiqim = (await cur.fetchone())[0] or 0
 
-        cursor = await db.execute(
-            "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tolov_turi='naqd'", (msg.from_user.id,))
-        naqd_sum = (await cursor.fetchone())[0] or 0
+        # Jami kirim
+        cur = await db.execute(
 
-        cursor = await db.execute(
-            "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tolov_turi='karta'", (msg.from_user.id,))
-        karta_sum = (await cursor.fetchone())[0] or 0
+[24.06.2026 12:14] Komiloff__: "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='kirim'", (uid,))
+        jami_kirim = (await cur.fetchone())[0] or 0
 
-        cursor = await db.execute(
-            "SELECT category, SUM(amount) FROM transactions WHERE user_id=? GROUP BY category ORDER BY SUM(amount) DESC",
-            (msg.from_user.id,))
-        cats = await cursor.fetchall()
+        # Naqd/Karta chiqim
+        cur = await db.execute(
+            "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='chiqim' AND tolov_turi='naqd'", (uid,))
+        naqd_sum = (await cur.fetchone())[0] or 0
 
-        cursor = await db.execute(
-            "SELECT amount, category, tolov_turi FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 5",
-            (msg.from_user.id,))
-        oxirgi = await cursor.fetchall()
+        cur = await db.execute(
+            "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='chiqim' AND tolov_turi='karta'", (uid,))
+        karta_sum = (await cur.fetchone())[0] or 0
 
-    if total == 0:
-        await msg.answer("📭 Hali xarajat yo'q.", reply_markup=main_menu())
-        return
+        # Bu oylik
+        oy = get_oy()
+        cur = await db.execute(
+            "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='chiqim' AND strftime('%Y-%m', sana)=?",
+            (uid, oy))
+        oy_chiqim = (await cur.fetchone())[0] or 0
 
-    cat_text = "".join(f"  {cat}: {amt:,} so'm\n" for cat, amt in cats)
-    oxirgi_text = "".join(
-        f"  {'💵' if t == 'naqd' else '💳'} {amt:,} so'm — {cat}\n"
-        for amt, cat, t in oxirgi
-    )
+        # Byudjet
+        cur = await db.execute("SELECT miqdor FROM byudjet WHERE user_id=? AND oy=?", (uid, oy))
+        byudjet_row = await cur.fetchone()
+        byudjet = byudjet_row[0] if byudjet_row else None
+
+        # Oxirgi 5
+        cur = await db.execute(
+            "SELECT amount, category, tolov_turi, tur FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 5",
+            (uid,))
+        oxirgi = await cur.fetchall()
+
+    balans = jami_kirim - jami_chiqim
+    balans_icon = "ð" if balans >= 0 else "ð"
+
+    byudjet_text = ""
+    if byudjet:
+        qolgan = byudjet - oy_chiqim
+        foiz = min(int(oy_chiqim / byudjet * 100), 100)
+        bar = "ð©" * (foiz // 10) + "â¬" * (10 - foiz // 10)
+        byudjet_text = (
+            f"\nð¯ <b>Bu oylik byudjet:</b>\n"
+            f"{bar} {foiz}%\n"
+            f"  Sarflandi: {format_sum(oy_chiqim)} so'm\n"
+            f"  Qoldi: {format_sum(max(qolgan,0))} so'm\n"
+        )
+
+    oxirgi_text = ""
+    for amt, cat, t, tur in oxirgi:
+        icon = "ð¥" if tur == "kirim" else ("ðµ" if t == "naqd" else "ð³")
+        oxirgi_text += f"  {icon} {format_sum(amt)} so'm â {cat}\n"
 
     await msg.answer(
-        f"📊 <b>Hisobingiz:</b>\n\n"
-        f"💰 <b>Jami: {total:,} so'm</b>\n"
-        f"💵 Naqd: {naqd_sum:,} so'm\n"
-        f"💳 Karta: {karta_sum:,} so'm\n\n"
-        f"📂 <b>Kategoriyalar:</b>\n{cat_text}\n"
-        f"🕐 <b>Oxirgi 5 ta:</b>\n{oxirgi_text}",
+        f"ð¼ <b>Balans:</b> {balans_icon} {format_sum(balans)} so'm\n\n"
+        f"ð¥ Jami kirim: <b>{format_sum(jami_kirim)} so'm</b>\n"
+        f"ð¤ Jami chiqim: <b>{format_sum(jami_chiqim)} so'm</b>\n\n"
+        f"ðµ Naqd chiqim: {format_sum(naqd_sum)} so'm\n"
+        f"ð³ Karta chiqim: {format_sum(karta_sum)} so'm\n"
+        f"{byudjet_text}\n"
+        f"ð <b>Oxirgi 5 ta:</b>\n{oxirgi_text}",
         parse_mode="HTML",
         reply_markup=main_menu()
     )
 
-# === KATEGORIYALAR ===
-@dp.message(F.text == "📊 Kategoriyalar")
-async def kategoriyalar(msg: types.Message, state: FSMContext):
+# === STATISTIKA ===
+@dp.message(Command("statistika"))
+@dp.message(F.text == "ð Statistika")
+async def statistika(msg: types.Message, state: FSMContext):
     await state.clear()
+    await msg.answer("ð Qaysi davr uchun statistika?", reply_markup=hisobot_menu())
+
+async def send_stat(msg_or_call, uid, sana_filter, davr_nomi):
     async with aiosqlite.connect("data.db") as db:
-        cursor = await db.execute(
-            "SELECT category, SUM(amount), COUNT(*) FROM transactions WHERE user_id=? GROUP BY category ORDER BY SUM(amount) DESC",
-            (msg.from_user.id,))
-        cats = await cursor.fetchall()
+        cur = await db.execute(
+            f"SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='chiqim' AND {sana_filter}",
+            (uid,))
+        jami = (await cur.fetchone())[0] or 0
 
-    if not cats:
-        await msg.answer("📭 Hali xarajat yo'q.", reply_markup=main_menu())
-        return
+        cur = await db.execute(
+            f"SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='kirim' AND {sana_filter}",
+            (uid,))
+        kirim = (await cur.fetchone())[0] or 0
 
-    text = "📊 <b>Kategoriyalar bo'yicha:</b>\n\n"
-    text += "".join(f"{cat}\n  💰 {amt:,} so'm ({count} ta)\n\n" for cat, amt, count in cats)
-    await msg.answer(text, parse_mode="HTML", reply_markup=main_menu())
+        cur = await db.execute(
+            f"SELECT category, SUM(amount), COUNT(*) FROM transactions WHERE user_id=? AND tur='chiqim' AND {sana_filter} GROUP BY category ORDER BY SUM(amount) DESC",
+            (uid,))
+        cats = await cursor_rows(cur)
 
-# === TOZALASH ===
-@dp.message(Command("tozala"))
-@dp.message(F.text == "🗑 Tozalash")
-async def tozala_confirm(msg: types.Message, state: FSMContext):
+        cur = await db.execute(
+            f"SELECT tolov_turi, SUM(amount) FROM transactions WHERE user_id=? AND tur='chiqim' AND {sana_filter} GROUP BY tolov_turi",
+            (uid,))
+        tolovlar = await cursor_rows(cur)
+
+    if jami == 0 and kirim == 0:
+        text = f"ð­ {davr_nomi} uchun ma'lumot yo'q."
+    else:
+        cat_text = ""
+        for cat, amt, count in cats:
+            foiz = int(amt / jami * 100) if jami else 0
+            bar = "â" * (foiz // 10) + "â" * (10 - foiz // 10)
+[24.06.2026 12:14] Komiloff__: cat_text += f"{cat}\n  {bar} {foiz}% â {format_sum(amt)} so'm ({count}x)\n"
+
+        tolov_text = ""
+        for t, amt in tolovlar:
+            icon = "ðµ" if t == "naqd" else "ð³"
+            tolov_text += f"  {icon} {t.capitalize()}: {format_sum(amt)} so'm\n"
+
+        text = (
+            f"ð <b>{davr_nomi} statistika:</b>\n\n"
+            f"ð¤ Chiqim: <b>{format_sum(jami)} so'm</b>\n"
+            f"ð¥ Kirim: <b>{format_sum(kirim)} so'm</b>\n"
+            f"ð° Balans: <b>{format_sum(kirim - jami)} so'm</b>\n\n"
+            f"ð <b>Kategoriyalar:</b>\n{cat_text}\n"
+            f"ð³ <b>To'lov turlari:</b>\n{tolov_text}"
+        )
+
+    if hasattr(msg_or_call, 'message'):
+        await msg_or_call.message.edit_text(text, parse_mode="HTML")
+        await msg_or_call.answer()
+    else:
+        await msg_or_call.answer(text, parse_mode="HTML", reply_markup=main_menu())
+
+async def cursor_rows(cur):
+    return await cur.fetchall()
+
+@dp.callback_query(F.data == "stat_bugun")
+async def stat_bugun(call: types.CallbackQuery):
+    bugun = datetime.now().strftime("%Y-%m-%d")
+    await send_stat(call, call.from_user.id, f"date(sana)='{bugun}'", "Bugungi")
+
+@dp.callback_query(F.data == "stat_hafta")
+async def stat_hafta(call: types.CallbackQuery):
+    hafta_boshi = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+    await send_stat(call, call.from_user.id, f"date(sana)>='{hafta_boshi}'", "Bu haftagi")
+
+@dp.callback_query(F.data == "stat_oy")
+async def stat_oy(call: types.CallbackQuery):
+    oy = get_oy()
+    await send_stat(call, call.from_user.id, f"strftime('%Y-%m', sana)='{oy}'", "Bu oylik")
+
+@dp.callback_query(F.data == "stat_jami")
+async def stat_jami(call: types.CallbackQuery):
+    await send_stat(call, call.from_user.id, "1=1", "Jami")
+
+# === KIRIM ===
+@dp.message(F.text == "ð¥ Kirim")
+async def kirim_boshlash(msg: types.Message, state: FSMContext):
     await state.clear()
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Ha, o'chir", callback_data="tozala_ha"),
-        InlineKeyboardButton(text="❌ Yo'q", callback_data="tozala_yoq"),
-    ]])
-    await msg.answer("⚠️ Barcha xarajatlarni o'chirishni istaysizmi?", reply_markup=keyboard)
-
-@dp.callback_query(F.data == "tozala_ha")
-async def tozala_ha(call: types.CallbackQuery):
-    async with aiosqlite.connect("data.db") as db:
-        await db.execute("DELETE FROM transactions WHERE user_id=?", (call.from_user.id,))
-        await db.commit()
-    await call.message.edit_text("✅ Barcha xarajatlar o'chirildi.")
-    await call.answer()
-
-@dp.callback_query(F.data == "tozala_yoq")
-async def tozala_yoq(call: types.CallbackQuery):
-    await call.message.edit_text("❌ Bekor qilindi.")
-    await call.answer()
-
-# === CHEK RASMI ===
-@dp.message(F.photo)
-async def chek_rasmi(msg: types.Message, state: FSMContext):
-    await state.clear()
-    await state.update_data(photo_id=msg.photo[-1].file_id)
     await msg.answer(
-        "📸 <b>Chek qabul qilindi!</b>\n\n"
-        "💰 Summani yozing (masalan: <code>25000</code> yoki <code>25 ming</code>):",
+        "ð¥ <b>Kirim miqdorini yozing:</b>\n\n"
+        "Misol: <code>2 mln maosh</code>\n"
+        "yoki: <code>500 ming freelance</code>",
         parse_mode="HTML"
     )
-    await state.set_state(ChekHolat.amount)
+    await state.set_state(KirimHolat.tolov_turi)
 
-@dp.message(ChekHolat.amount)
-async def chek_amount(msg: types.Message, state: FSMContext):
-    amount = get_amount(msg.text)
+@dp.message(KirimHolat.tolov_turi)
+async def kirim_qabul(msg: types.Message, state: FSMContext):
+    text = msg.text
+    amount = get_amount(text)
     if not amount:
-        await msg.answer("❌ Summani topa olmadim. Masalan: <code>25000</code>", parse_mode="HTML")
+        await msg.answer("â Summani topa olmadim. Masalan: <code>500 ming maosh</code>", parse_mode="HTML")
         return
-    await state.update_data(amount=amount)
+
+    category = get_kirim_category(text)
+    await state.update_data(amount=amount, category=category)
+
     await msg.answer(
-        f"💰 Summa: <b>{amount:,} so'm</b>\n\n📂 Kategoriyani tanlang:",
+        f"ð¥ <b>{format_sum(amount)} so'm</b> â {category}\n\nTo'lov turini tanlang:",
         parse_mode="HTML",
-        reply_markup=kategoriya_menu()
+        reply_markup=kirim_tolov_menu()
     )
-    await state.set_state(ChekHolat.category)
 
-@dp.callback_query(ChekHolat.category, F.data.startswith("chekcat_"))
-async def chek_category(call: types.CallbackQuery, state: FSMContext):
-    cat_map = {
-        "chekcat_transport": "🚖 Transport",
-        "chekcat_ovqat": "🍽 Ovqat",
-        "chekcat_jamoat": "🚌 Jamoat transport",
-        "chekcat_kongil": "🎬 Ko'ngil ochar",
-        "chekcat_soglik": "💊 Sog'liq",
-        "chekcat_boshqa": "📦 Boshqa",
-    }
-    category = cat_map.get(call.data, "📦 Boshqa")
-    await state.update_data(category=category)
-    await call.message.edit_text(
-        f"📂 Kategoriya: <b>{category}</b>\n\n💳 To'lov turini tanlang:",
-        parse_mode="HTML",
-        reply_markup=chek_tolov_menu()
-    )
-    await state.set_state(ChekHolat.tolov_turi)
-    await call.answer()
+def get_kirim_category(text):
+    text = text.lower()
+    if any(w in text for w in ["maosh", "ish haqi", "oylik"]):
+        return "ð¼ Maosh"
+    elif any(w in text for w in ["freelance", "loyiha", "project"]):
+        return "ð» Freelance"
+    elif any(w in text for w in ["sovg'a", "hadya", "gift"]):
+        return "ð Sovg'a"
+    elif any(w in text for w in ["ijara", "rent"]):
+        return "ð  Ijara"
+    else:
+        return "ð¥ Boshqa kirim"
 
-@dp.callback_query(ChekHolat.tolov_turi, F.data.startswith("chek_"))
-async def chek_tolov(call: types.CallbackQuery, state: FSMContext):
-    tolov_turi = "naqd" if "naqd" in call.data else "karta"
+@dp.callback_query(KirimHolat.tolov_turi, F.data.startswith("kirim_"))
+async def kirim_tolov_tanlandi(call: types.CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    tolov_turi = parts[1]
+
     data = await state.get_data()
     amount = data.get("amount")
     category = data.get("category")
 
     async with aiosqlite.connect("data.db") as db:
         await db.execute(
-            "INSERT INTO transactions (user_id, amount, category, tolov_turi) VALUES (?, ?, ?, ?)",
+            "INSERT INTO transactions (user_id, amount, category, tolov_turi, tur) VALUES (?, ?, ?, ?, 'kirim')",
             (call.from_user.id, amount, category, tolov_turi)
         )
         await db.commit()
 
     await state.clear()
 
-    icon = "💵" if tolov_turi == "naqd" else "💳"
-    tolov_nomi = "Naqd" if tolov_turi == "naqd" else "Karta"
-
+    icon = "ðµ" if tolov_turi == "naqd" else "ð³"
     await call.message.edit_text(
-        f"✅ <b>Chek saqlandi!</b>\n\n"
-        f"📸 Chek asosida:\n"
-        f"{icon} <b>{amount:,} so'm</b>\n"
-        f"📂 {category}\n"
-        f"💳 To'lov: {tolov_nomi}",
+        f"â <b>Kirim saqlandi!</b>\n\n"
+        f"ð¥ {icon} <b>{format_sum(amount)} so'm</b>\n"
+[24.06.2026 12:14] Komiloff__: f"ð {category}",
         parse_mode="HTML"
     )
-    await call.answer("✅ Saqlandi!")
+    await call.answer("â Kirim saqlandi!")
 
-# === MATN XARAJAT ===
-MENU_BUTTONS = ["💰 Hisob", "📊 Kategoriyalar", "🗑 Tozalash", "ℹ️ Yordam"]
+# === CHIQIM (tugma orqali) ===
+@dp.message(F.text == "ð¤ Chiqim")
+async def chiqim_boshlash(msg: types.Message, state: FSMContext):
+    await state.clear()
+    await msg.answer(
+        "ð¤ <b>Chiqim miqdorini yozing:</b>\n\n"
+        "Misol: <code>20 ming taksi</code>\n"
+        "yoki: <code>150000 oziq-ovqat</code>",
+        parse_mode="HTML"
+    )
+
+# === BYUDJET ===
+@dp.message(Command("byudjet"))
+@dp.message(F.text == "ð¯ Byudjet")
+async def byudjet_boshlash(msg: types.Message, state: FSMContext):
+    await state.clear()
+    uid = msg.from_user.id
+    oy = get_oy()
+
+    async with aiosqlite.connect("data.db") as db:
+        cur = await db.execute("SELECT miqdor FROM byudjet WHERE user_id=? AND oy=?", (uid, oy))
+        row = await cur.fetchone()
+
+    if row:
+        cur_chiqim = await get_oy_chiqim(uid, oy)
+        qolgan = row[0] - cur_chiqim
+        foiz = min(int(cur_chiqim / row[0] * 100), 100)
+        bar = "ð©" * (foiz // 10) + "â¬" * (10 - foiz // 10)
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="âï¸ O'zgartirish", callback_data="byudjet_ozgartir"),
+            InlineKeyboardButton(text="ð O'chirish", callback_data="byudjet_ochir"),
+        ]])
+        await msg.answer(
+            f"ð¯ <b>Bu oylik byudjet:</b>\n\n"
+            f"ð° Belgilangan: {format_sum(row[0])} so'm\n"
+            f"ð¤ Sarflandi: {format_sum(cur_chiqim)} so'm\n"
+            f"ð Qoldi: {format_sum(max(qolgan,0))} so'm\n\n"
+            f"{bar} {foiz}%",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    else:
+        await msg.answer(
+            "ð¯ <b>Bu oy uchun byudjet belgilanmagan.</b>\n\n"
+            "Byudjet miqdorini yozing (so'mda):\n"
+            "Masalan: <code>3 mln</code> yoki <code>2000000</code>",
+            parse_mode="HTML"
+        )
+        await state.set_state(ByudjetHolat.miqdor)
+
+async def get_oy_chiqim(uid, oy):
+    async with aiosqlite.connect("data.db") as db:
+        cur = await db.execute(
+            "SELECT SUM(amount) FROM transactions WHERE user_id=? AND tur='chiqim' AND strftime('%Y-%m', sana)=?",
+            (uid, oy))
+        val = (await cur.fetchone())[0] or 0
+    return val
+
+@dp.callback_query(F.data == "byudjet_ozgartir")
+async def byudjet_ozgartir(call: types.CallbackQuery, state: FSMContext):
+    await call.message.edit_text("âï¸ Yangi byudjet miqdorini yozing:")
+    await state.set_state(ByudjetHolat.miqdor)
+    await call.answer()
+
+@dp.callback_query(F.data == "byudjet_ochir")
+async def byudjet_ochir(call: types.CallbackQuery):
+    async with aiosqlite.connect("data.db") as db:
+        await db.execute("DELETE FROM byudjet WHERE user_id=? AND oy=?", (call.from_user.id, get_oy()))
+        await db.commit()
+    await call.message.edit_text("â Byudjet o'chirildi.")
+    await call.answer()
+
+@dp.message(ByudjetHolat.miqdor)
+async def byudjet_saqlash(msg: types.Message, state: FSMContext):
+    amount = get_amount(msg.text)
+    if not amount:
+        await msg.answer("â Summani topa olmadim. Masalan: <code>3 mln</code>", parse_mode="HTML")
+        return
+
+    oy = get_oy()
+    async with aiosqlite.connect("data.db") as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO byudjet (user_id, miqdor, oy) VALUES (?, ?, ?)",
+            (msg.from_user.id, amount, oy)
+        )
+        await db.commit()
+
+    await state.clear()
+    await msg.answer(
+        f"â <b>Byudjet belgilandi:</b> {format_sum(amount)} so'm\n\n"
+        "Bu oy xarajatingiz belgilangan byudjetdan oshsa ogohlantiraman! ð",
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+# === EKSPORT ===
+@dp.message(Command("eksport"))
+@dp.message(F.text == "ð Eksport")
+async def eksport(msg: types.Message, state: FSMContext):
+    await state.clear()
+    uid = msg.from_user.id
+
+    async with aiosqlite.connect("data.db") as db:
+        cur = await db.execute(
+[24.06.2026 12:14] Komiloff__: "SELECT sana, tur, amount, category, tolov_turi FROM transactions WHERE user_id=? ORDER BY sana DESC",
+            (uid,))
+        rows = await cur.fetchall()
+
+    if not rows:
+        await msg.answer("ð­ Hali xarajat yo'q.", reply_markup=main_menu())
+        return
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Sana", "Tur", "Miqdor (so'm)", "Kategoriya", "To'lov turi"])
+    for sana, tur, amount, category, tolov in rows:
+        writer.writerow([sana, tur, amount, category, tolov])
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    file = BufferedInputFile(csv_bytes, filename=f"pulmind_{datetime.now().strftime('%Y%m%d')}.csv")
+
+    await msg.answer_document(
+        file,
+        caption=f"ð <b>PulMind eksport</b>\nJami {len(rows)} ta yozuv",
+        parse_mode="HTML"
+    )
+
+# === ESLATMA ===
+@dp.message(F.text == "ð Eslatma")
+async def eslatma_boshlash(msg: types.Message, state: FSMContext):
+    await state.clear()
+    await msg.answer(
+        "ð <b>Eslatma vaqtini yozing:</b>\n\n"
+        "Format: <code>HH:MM</code>\n"
+        "Masalan: <code>20:00</code> (har kuni kechki 8da)",
+        parse_mode="HTML"
+    )
+    await state.set_state(EslatmaHolat.vaqt)
+
+@dp.message(EslatmaHolat.vaqt)
+async def eslatma_vaqt(msg: types.Message, state: FSMContext):
+    vaqt = msg.text.strip()
+    if not re.match(r"^\d{1,2}:\d{2}$", vaqt):
+        await msg.answer("â Format xato. Masalan: <code>20:00</code>", parse_mode="HTML")
+        return
+    await state.update_data(vaqt=vaqt)
+    await msg.answer("ð Eslatma matni yozing:")
+    await state.set_state(EslatmaHolat.xabar)
+
+@dp.message(EslatmaHolat.xabar)
+async def eslatma_xabar(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    vaqt = data.get("vaqt")
+    xabar = msg.text
+
+    async with aiosqlite.connect("data.db") as db:
+        await db.execute(
+            "INSERT INTO eslatmalar (user_id, vaqt, xabar) VALUES (?, ?, ?)",
+            (msg.from_user.id, vaqt, xabar)
+        )
+        await db.commit()
+
+    await state.clear()
+    await msg.answer(
+        f"â <b>Eslatma saqlandi!</b>\n\n"
+        f"â° Vaqt: {vaqt}\n"
+        f"ð Xabar: {xabar}",
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+# === ESLATMA YUBORUVCHI ===
+async def eslatma_checker():
+    while True:
+        try:
+            now = datetime.now().strftime("%H:%M")
+            async with aiosqlite.connect("data.db") as db:
+                cur = await db.execute(
+                    "SELECT id, user_id, xabar FROM eslatmalar WHERE vaqt=? AND sent=0", (now,))
+                rows = await cur.fetchall()
+                for row_id, uid, xabar in rows:
+                    try:
+                        await bot.send_message(uid, f"ð <b>Eslatma:</b>\n{xabar}", parse_mode="HTML")
+                        await db.execute("UPDATE eslatmalar SET sent=1 WHERE id=?", (row_id,))
+                    except:
+                        pass
+                await db.commit()
+        except:
+            pass
+        await asyncio.sleep(60)
+
+# === TOZALASH ===
+@dp.message(Command("tozala"))
+@dp.message(F.text == "ð Tozalash")
+async def tozala_confirm(msg: types.Message, state: FSMContext):
+    await state.clear()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="â Ha, o'chir", callback_data="tozala_ha"),
+        InlineKeyboardButton(text="â Yo'q", callback_data="tozala_yoq"),
+    ]])
+    await msg.answer("â ï¸ Barcha ma'lumotlarni o'chirishni istaysizmi?", reply_markup=keyboard)
+
+@dp.callback_query(F.data == "tozala_ha")
+async def tozala_ha(call: types.CallbackQuery):
+    async with aiosqlite.connect("data.db") as db:
+        await db.execute("DELETE FROM transactions WHERE user_id=?", (call.from_user.id,))
+        await db.execute("DELETE FROM byudjet WHERE user_id=?", (call.from_user.id,))
+        await db.commit()
+    await call.message.edit_text("â Barcha ma'lumotlar o'chirildi.")
+    await call.answer()
+
+@dp.callback_query(F.data == "tozala_yoq")
+[24.06.2026 12:14] Komiloff__: async def tozala_yoq(call: types.CallbackQuery):
+    await call.message.edit_text("â Bekor qilindi.")
+    await call.answer()
+
+# === OVOZLI XABAR ===
+@dp.message(F.voice)
+async def ovozli_xabar(msg: types.Message, state: FSMContext):
+    await state.clear()
+    wait_msg = await msg.answer("ð¤ Ovoz qabul qilindi, tanilmoqda...")
+
+    file = await bot.get_file(msg.voice.file_id)
+    ogg_path = f"voice_{msg.from_user.id}.ogg"
+    wav_path = f"voice_{msg.from_user.id}.wav"
+
+    await bot.download_file(file.file_path, ogg_path)
+
+    text = None
+    try:
+        from pydub import AudioSegment
+        import speech_recognition as sr
+
+        AudioSegment.from_ogg(ogg_path).export(wav_path, format="wav")
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio_data = recognizer.record(source)
+            for lang in ["uz-UZ", "ru-RU"]:
+                try:
+                    text = recognizer.recognize_google(audio_data, language=lang)
+                    break
+                except:
+                    continue
+    except Exception as e:
+        pass
+    finally:
+        for f in [ogg_path, wav_path]:
+            if os.path.exists(f):
+                os.remove(f)
+
+    await wait_msg.delete()
+
+    if not text:
+        await msg.answer(
+            "â ï¸ Ovozni tanib bo'lmadi.\n"
+            "Matn ko'rinishida yozing: <code>20 ming taksi</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    await msg.answer(f"ð Tanildi: <b>{text}</b>", parse_mode="HTML")
+
+    amount = get_amount(text)
+    if not amount:
+        await msg.answer("â Summani topa olmadim.", parse_mode="HTML")
+        return
+
+    category = get_category(text)
+    await state.update_data(amount=amount, category=category)
+    await state.set_state(TolovHolat.tolov_turi)
+
+    await msg.answer(
+        f"ð° <b>{format_sum(amount)} so'm</b> â {category}\n\nTo'lov turini tanlang:",
+        parse_mode="HTML",
+        reply_markup=tolov_menu("v")
+    )
+
+# === MATN XARAJAT (asosiy handler) ===
+MENU_BUTTONS = [
+    "ð° Hisob", "ð Statistika", "ð¥ Kirim", "ð¤ Chiqim",
+    "ð¯ Byudjet", "ð Eksport", "ð Eslatma", "â¹ï¸ Yordam", "ð Tozalash"
+]
 
 @dp.message(F.text)
 async def save(msg: types.Message, state: FSMContext):
     if msg.text in MENU_BUTTONS:
         return
-    await state.clear()
+
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
     text = msg.text
     amount = get_amount(text)
     if not amount:
         await msg.answer(
-            "❌ Summani topa olmadim.\n"
-            "Masalan: <code>20000 taksi</code> yoki <code>20 ming tushlik</code>",
+            "â Summani topa olmadim.\n"
+            "Masalan: <code>20 ming taksi</code> yoki <code>150000 ovqat</code>",
             parse_mode="HTML"
         )
         return
+
     category = get_category(text)
     await state.update_data(amount=amount, category=category)
     await state.set_state(TolovHolat.tolov_turi)
+
+    # Byudjet tekshiruvi
+    uid = msg.from_user.id
+    oy = get_oy()
+    async with aiosqlite.connect("data.db") as db:
+        cur = await db.execute("SELECT miqdor FROM byudjet WHERE user_id=? AND oy=?", (uid, oy))
+        brow = await cur.fetchone()
+
+    byudjet_ogohlantirish = ""
+    if brow:
+        cur_chiqim = await get_oy_chiqim(uid, oy)
+        yangi_jami = cur_chiqim + amount
+        if yangi_jami > brow[0]:
+            ortiq = yangi_jami - brow[0]
+            byudjet_ogohlantirish = f"\n\nâ ï¸ <b>Byudjetdan {format_sum(ortiq)} so'm oshadi!</b>"
+
     await msg.answer(
-        f"💰 <b>{amount:,} so'm</b> — {category}\n\nTo'lov turini tanlang:",
+        f"ð° <b>{format_sum(amount)} so'm</b> â {category}{byudjet_ogohlantirish}\n\nTo'lov turini tanlang:",
         parse_mode="HTML",
         reply_markup=tolov_menu("m")
     )
@@ -369,39 +787,42 @@ async def save(msg: types.Message, state: FSMContext):
 async def tolov_tanlandi(call: types.CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
     tolov_turi = parts[1]
+
     data = await state.get_data()
     amount = data.get("amount")
     category = data.get("category")
 
     if not amount or not category:
-        await call.answer("❌ Xatolik, qaytadan yozing", show_alert=True)
-        await state.clear()
+        await call.answer("â Xatolik, qaytadan yozing", show_alert=True)
+[24.06.2026 12:14] Komiloff__: await state.clear()
         return
 
     async with aiosqlite.connect("data.db") as db:
         await db.execute(
-            "INSERT INTO transactions (user_id, amount, category, tolov_turi) VALUES (?, ?, ?, ?)",
+            "INSERT INTO transactions (user_id, amount, category, tolov_turi, tur) VALUES (?, ?, ?, ?, 'chiqim')",
             (call.from_user.id, amount, category, tolov_turi)
         )
         await db.commit()
 
     await state.clear()
-    icon = "💵" if tolov_turi == "naqd" else "💳"
+
+    icon = "ðµ" if tolov_turi == "naqd" else "ð³"
     tolov_nomi = "Naqd" if tolov_turi == "naqd" else "Karta"
 
     await call.message.edit_text(
-        f"✅ <b>Saqlandi!</b>\n\n"
-        f"{icon} <b>{amount:,} so'm</b>\n"
-        f"📂 {category}\n"
-        f"💳 To'lov: {tolov_nomi}",
+        f"â <b>Saqlandi!</b>\n\n"
+        f"{icon} <b>{format_sum(amount)} so'm</b>\n"
+        f"ð {category}\n"
+        f"ð³ To'lov: {tolov_nomi}",
         parse_mode="HTML"
     )
-    await call.answer("✅ Saqlandi!")
+    await call.answer("â Saqlandi!")
 
 # === MAIN ===
 async def main():
     await init_db()
-    print("✅ Bot ishga tushdi!")
+    print("â PulMind Bot ishga tushdi!")
+    asyncio.create_task(eslatma_checker())
     await dp.start_polling(bot)
 
 asyncio.run(main())
