@@ -1,4 +1,4 @@
-[24.06.2026 12:14] Komiloff__: import asyncio
+
 import re
 import os
 import csv
