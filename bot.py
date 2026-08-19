@@ -111,7 +111,7 @@ def get_amount(text):
     text = text.lower().strip()
     text = text.replace(",", ".")
 
-    # MING: "17 ming", "17ming", "17k"
+    # MING: "17 ming", "17ming", "17k", "17min"
     ming_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:ming|k\b)", text)
     if ming_match:
         return int(float(ming_match.group(1)) * 1000)
