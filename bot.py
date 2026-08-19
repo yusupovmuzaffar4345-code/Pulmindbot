@@ -82,7 +82,7 @@ async def init_db():
 # === YORDAMCHI FUNKSIYALAR ===
 def get_category(text):
     text = text.lower()
-    if any(w in text for w in ["taksi", "yandex", "uber", "transport"]):
+    if any(w in text for w in ["taksi", "yandex", "uber", "transport" "WB taxi"]):
         return "🚖 Transport"
     elif any(w in text for w in ["ovqat", "tushlik", "nonushta", "kechki", "restoran", "cafe", "kafe", "doner", "pizza", "burger"]):
         return "🍽 Ovqat"
