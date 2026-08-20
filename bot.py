@@ -105,6 +105,7 @@ def get_amount(text):
     """
     Raqamni to'g'ri parse qilish.
     '17 ming' → 17000
+    '17 min' → 17000
     '1.5 mln' → 1500000
     '20000' → 20000
     """
