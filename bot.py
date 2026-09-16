@@ -212,7 +212,7 @@ async def yordam(msg: types.Message):
         "📥 <b>Kirim yozish:</b>\n"
         "<code>📥 Kirim</code> tugmasini bosing\n"
         "yoki: <code>2 mln maosh</code>\n\n"
-        "🎤 <b>Ovozli xabar</b> ham qabul qilinadi\n\n"
+        "🎤 <b>Ovozli xabar</b> ham qabul qilinadi test rejim \n\n"
         "📊 <b>Raqam yozish usullari:</b>\n"
         "<code>17 ming</code> → 17,000 so'm\n"
         "<code>1.5 mln</code> → 1,500,000 so'm\n"
